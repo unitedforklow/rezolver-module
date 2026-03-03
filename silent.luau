@@ -1,7 +1,3 @@
---[[
-    Module: REZOLVER Silent Aim V8 (ULTIMATE)
-    Fixes: "index boolean with p", GunClient support, WallCheck stability.
-]]
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -11,18 +7,17 @@ local Stats = game:GetService("Stats")
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
 
--- Конфиг с защитой от nil
 local function GetCfg()
     local g = getgenv().RezolverSilent or {}
     return {
         Enabled = g.Enabled or false,
         TargetPart = g.TargetPart or "Head",
-        Prediction = g.Prediction or 0.155,
+        Prediction = g.Prediction or 0.08,
         AutoPredict = (g.AutoPredict == true),
         GravPredict = (g.GravPredict == true),
         UseFOV = (g.UseFOV == true),
         FOVSize = g.FOVSize or 50,
-        Resolver = (g.Resolver == true),
+        Resolver = (g.Resolver ~= false),
         WallCheck = (g.WallCheck == true),
         ShowFOV = (g.ShowFOV == true)
     }
@@ -35,7 +30,6 @@ local State = {
     PredictedCFrame = nil
 }
 
--- FOV Отрисовка
 local FOVCircle = Drawing.new("Circle")
 FOVCircle.Thickness = 1
 FOVCircle.NumSides = 64
@@ -50,7 +44,7 @@ local function IsValid(char)
     return true
 end
 
--- Резольвер (Считает реальную скорость)
+-- Резольвер
 RunService.Heartbeat:Connect(function(dt)
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
@@ -63,7 +57,6 @@ RunService.Heartbeat:Connect(function(dt)
     end
 end)
 
--- РАСЧЕТ ПРЕДИКТА (Вынесен отдельно для оптимизации)
 local function UpdatePrediction()
     local Cfg = GetCfg()
     if not State.Target then 
@@ -75,26 +68,35 @@ local function UpdatePrediction()
     local part = State.Target:FindFirstChild(Cfg.TargetPart)
     if not part then return end
 
-    local vel = part.AssemblyLinearVelocity
-    if Cfg.Resolver then
-        local p = Players:GetPlayerFromCharacter(State.Target)
-        if p and State.ResolvedVelocities[p] then vel = State.ResolvedVelocities[p].Velocity end
+    -- Всегда используем резольвер (точнее чем AssemblyLinearVelocity)
+    local vel = Vector3.new(0, 0, 0)
+    local p = Players:GetPlayerFromCharacter(State.Target)
+    if p and State.ResolvedVelocities[p] then 
+        vel = State.ResolvedVelocities[p].Velocity 
     end
 
+    -- Правильный расчёт пинга (RTT / 2)
     local ping = 50
     pcall(function() ping = Stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
-    local pred = Cfg.AutoPredict and (0.11 + (ping/1000) * 0.4) or Cfg.Prediction
+    local pingSec = (ping / 1000) / 2
+    local pred = Cfg.AutoPredict and (0.05 + pingSec) or Cfg.Prediction
     
     local pos = part.Position + (vel * pred)
-    if Cfg.GravPredict and State.Target.Humanoid:GetState() == Enum.HumanoidStateType.Freefall then
-        pos = pos - Vector3.new(0, (Workspace.Gravity * 0.5 * (pred^2)), 0)
+    
+    -- GravPredict только если реально падает
+    local hum = State.Target:FindFirstChild("Humanoid")
+    if Cfg.GravPredict and hum and hum:GetState() == Enum.HumanoidStateType.Freefall then
+        local fallSpeed = math.abs(vel.Y)
+        if fallSpeed > 5 then
+            pos = pos - Vector3.new(0, (Workspace.Gravity * 0.5 * (pred^2)), 0)
+        end
     end
     
     State.PredictedPos = pos
     State.PredictedCFrame = CFrame.new(pos)
 end
 
--- ПОИСК ЦЕЛИ
+-- Поиск цели
 RunService.RenderStepped:Connect(function()
     local Cfg = GetCfg()
     local Camera = Workspace.CurrentCamera
@@ -124,9 +126,6 @@ RunService.RenderStepped:Connect(function()
     if State.Target then UpdatePrediction() end
 end)
 
---========================================================
---[ THE ULTIMATE SAFE HOOKS ]
---========================================================
 local OldNC
 local OldIdx
 
@@ -148,11 +147,10 @@ end))
 
 OldIdx = hookmetamethod(game, "__index", newcclosure(function(self, key)
     local Cfg = GetCfg()
-    -- Проверяем, что запрос идет к МЫШКЕ и мы в режиме Silent
     if Cfg.Enabled and not checkcaller() and State.Target and State.PredictedCFrame then
         if typeof(self) == "Instance" and self:IsA("PlayerMouse") then
             if key == "Hit" or key == "hit" then
-                return State.PredictedCFrame -- Возвращаем только если есть цель!
+                return State.PredictedCFrame
             elseif key == "Target" or key == "target" then
                 return State.Target:FindFirstChild(Cfg.TargetPart)
             end
