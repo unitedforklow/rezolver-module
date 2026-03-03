@@ -1,5 +1,6 @@
 --[[
-    REZOLVER Silent Aim
+    Module: REZOLVER Silent Aim V5 (DEBUG EDITION)
+    Game: Da Hood
 ]]
 local clref = cloneref or function(obj) return obj end
 local cmpinst = compareinstances or function(a, b) return a == b end
@@ -14,7 +15,7 @@ local LocalPlayer = clref(Players.LocalPlayer)
 local Mouse = clref(LocalPlayer:GetMouse())
 
 getgenv().RezolverSilent = getgenv().RezolverSilent or {
-    Enabled = false,
+    Enabled = true,
     TargetPart = "Head",
     Prediction = 0.155,
     AutoPredict = true,
@@ -24,16 +25,25 @@ getgenv().RezolverSilent = getgenv().RezolverSilent or {
     Resolver = true,
     WallCheck = false,
     ShowFOV = true,
-    FOVColor = Color3.fromRGB(80, 105, 255)
+    FOVColor = Color3.fromRGB(80, 105, 255),
+    DebugMode = true -- ВКЛЮЧЕН РЕЖИМ ОТЛАДКИ
 }
 local Cfg = getgenv().RezolverSilent
-local State = { Target = nil, ResolvedVelocities = {} }
+local State = { Target = nil, ResolvedVelocities = {}, IsClicking = false }
 
 local FOVCircle = Drawing.new("Circle")
 FOVCircle.Thickness = 1
 FOVCircle.NumSides = 64
 FOVCircle.Filled = false
 FOVCircle.Transparency = 0.8
+
+-- ВИЗУАЛЬНЫЙ ДЕБАГГЕР (Текст на экране)
+local DebugText = Drawing.new("Text")
+DebugText.Size = 16
+DebugText.Color = Color3.fromRGB(0, 255, 0)
+DebugText.Outline = true
+DebugText.Position = Vector2.new(15, 300)
+DebugText.Visible = Cfg.DebugMode
 
 local function IsValidTarget(char)
     if not char then return false end
@@ -61,8 +71,8 @@ local function IsVisible(targetPart)
     local result = Workspace:Raycast(camPos, partPos - camPos, params)
     if result and result.Instance then
         if result.Instance:IsDescendantOf(targetPart.Parent) then return true end
-        if result.Instance.Transparency == 1 or not result.Instance.CanCollide then return true end
-        return false
+        if result.Instance.Transparency > 0.4 or not result.Instance.CanCollide then return true end
+        return false 
     end
     return true
 end
@@ -147,8 +157,41 @@ RunService.RenderStepped:Connect(function()
     FOVCircle.Color = Cfg.FOVColor
     FOVCircle.Visible = Cfg.Enabled and Cfg.ShowFOV and Cfg.UseFOV
     State.Target = Cfg.Enabled and GetTarget() or nil
+
+    -- ОБНОВЛЕНИЕ ВИЗУАЛЬНОГО ДЕБАГА
+    if Cfg.DebugMode then
+        DebugText.Visible = true
+        local targetName = State.Target and State.Target.Name or "NONE"
+        local dist = "0"
+        if State.Target and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+            dist = tostring(math.floor((State.Target[Cfg.TargetPart].Position - LocalPlayer.Character.HumanoidRootPart.Position).Magnitude))
+        end
+        local currentPred = Cfg.AutoPredict and math.clamp(0.11 + (GetPing() / 1000) * 0.4, 0.1, 0.25) or Cfg.Prediction
+        
+        DebugText.Text = string.format(
+            "[ REZOLVER SILENT DEBUG ]\nTarget: %s\nDistance: %s studs\nPing: %d ms\nPredict: %.3f\nWallCheck: %s",
+            targetName, dist, GetPing(), currentPred, tostring(Cfg.WallCheck)
+        )
+    else
+        DebugText.Visible = false
+    end
 end)
 
+-- ОТСЛЕЖИВАЕМ КЛИК (Для дебаггера в консоль)
+UserInputService.InputBegan:Connect(function(i, gp)
+    if not gp and i.UserInputType == Enum.UserInputType.MouseButton1 then
+        State.IsClicking = true
+    end
+end)
+UserInputService.InputEnded:Connect(function(i, gp)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then
+        State.IsClicking = false
+    end
+end)
+
+--========================================================
+--[ THE PERFECT SILENT HOOKS & DEBUG LOGS ]
+--========================================================
 local OldNamecall
 local OldIndex
 
@@ -156,10 +199,21 @@ if hookmetamethod and newcclosure then
     OldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
         local method = getnamecallmethod()
         local args = {...}
+        
+        -- Сниффер пакетов при клике мышки (Чтобы понять, чем стреляет оружие)
+        if Cfg.DebugMode and State.IsClicking and not checkcaller() and method == "FireServer" then
+            if tostring(self) == "MainEvent" then
+                print("[DEBUG] MainEvent FireServer called with arg1:", tostring(args[1]))
+            end
+        end
+
         if Cfg.Enabled and not checkcaller() and State.Target and method == "FireServer" and tostring(self) == "MainEvent" then
-            if type(args[1]) == "string" and (args[1] == "UpdateMousePos" or args[1] == "MousePos") then
+            if type(args[1]) == "string" and (string.find(args[1], "MousePos") or string.find(args[1], "UpdateMousePos")) then
                 local predictedPos = GetPredictedPosition()
                 if predictedPos then
+                    if Cfg.DebugMode and State.IsClicking then
+                        print("[DEBUG] SUCCESS: Spoofed UpdateMousePos to Target Head!")
+                    end
                     args[2] = predictedPos 
                     return OldNamecall(self, unpack(args))
                 end
@@ -169,16 +223,28 @@ if hookmetamethod and newcclosure then
     end))
 
     OldIndex = hookmetamethod(game, "__index", newcclosure(function(self, key)
-        if Cfg.Enabled and not checkcaller() and self == Mouse and State.Target then
-            if key == "Hit" or key == "hit" then
-                local predictedPos = GetPredictedPosition()
-                if predictedPos then return CFrame.new(predictedPos) end
-            elseif key == "Target" or key == "target" then
-                return State.Target:FindFirstChild(Cfg.TargetPart)
+        if Cfg.Enabled and not checkcaller() and State.Target and (typeof(self) == "Instance" and self:IsA("PlayerMouse")) then
+            local predictedPos = GetPredictedPosition()
+            if predictedPos then
+                if key == "Hit" or key == "hit" then
+                    if Cfg.DebugMode and State.IsClicking then print("[DEBUG] Hooked Mouse.Hit") end
+                    return CFrame.new(predictedPos)
+                elseif key == "Target" or key == "target" then
+                    return State.Target:FindFirstChild(Cfg.TargetPart)
+                elseif key == "X" or key == "x" then
+                    local screen, _ = Workspace.CurrentCamera:WorldToScreenPoint(predictedPos)
+                    return screen.X
+                elseif key == "Y" or key == "y" then
+                    local screen, _ = Workspace.CurrentCamera:WorldToScreenPoint(predictedPos)
+                    return screen.Y
+                elseif key == "UnitRay" then
+                    local camPos = Workspace.CurrentCamera.CFrame.Position
+                    return Ray.new(camPos, (predictedPos - camPos).Unit)
+                end
             end
         end
         return OldIndex(self, key)
     end))
 end
 
-print("[REZOLVER] Silent Aim Loaded.")
+print("[REZOLVER] Silent Aim V5 (DEBUG EDITION) Loaded.")
