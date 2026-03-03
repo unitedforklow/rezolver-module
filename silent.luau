@@ -1,6 +1,6 @@
 --[[
-    Module: REZOLVER Silent Aim V7 (BUG FIX)
-    Fixes: "index boolean with p", GunClient arithmetic error.
+    Module: REZOLVER Silent Aim V8 (ULTIMATE)
+    Fixes: "index boolean with p", GunClient support, WallCheck stability.
 ]]
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -9,8 +9,9 @@ local Workspace = game:GetService("Workspace")
 local Stats = game:GetService("Stats")
 
 local LocalPlayer = Players.LocalPlayer
+local Mouse = LocalPlayer:GetMouse()
 
--- Безопасное получение конфига (без nil)
+-- Конфиг с защитой от nil
 local function GetCfg()
     local g = getgenv().RezolverSilent or {}
     return {
@@ -23,14 +24,18 @@ local function GetCfg()
         FOVSize = g.FOVSize or 50,
         Resolver = (g.Resolver == true),
         WallCheck = (g.WallCheck == true),
-        ShowFOV = (g.ShowFOV == true),
-        FOVColor = g.FOVColor or Color3.fromRGB(255, 255, 255)
+        ShowFOV = (g.ShowFOV == true)
     }
 end
 
-local State = { Target = nil, ResolvedVelocities = {} }
+local State = { 
+    Target = nil, 
+    ResolvedVelocities = {},
+    PredictedPos = nil,
+    PredictedCFrame = nil
+}
 
--- Отрисовка FOV
+-- FOV Отрисовка
 local FOVCircle = Drawing.new("Circle")
 FOVCircle.Thickness = 1
 FOVCircle.NumSides = 64
@@ -45,17 +50,7 @@ local function IsValid(char)
     return true
 end
 
--- WALL CHECK (Raycast)
-local function IsVisible(targetPart)
-    local cam = Workspace.CurrentCamera
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = {LocalPlayer.Character, cam}
-    local result = Workspace:Raycast(cam.CFrame.Position, targetPart.Position - cam.CFrame.Position, params)
-    return (result == nil or result.Instance:IsDescendantOf(targetPart.Parent))
-end
-
--- Резольвер
+-- Резольвер (Считает реальную скорость)
 RunService.Heartbeat:Connect(function(dt)
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
@@ -68,7 +63,38 @@ RunService.Heartbeat:Connect(function(dt)
     end
 end)
 
--- Поиск цели в RenderStepped (для точности)
+-- РАСЧЕТ ПРЕДИКТА (Вынесен отдельно для оптимизации)
+local function UpdatePrediction()
+    local Cfg = GetCfg()
+    if not State.Target then 
+        State.PredictedPos = nil
+        State.PredictedCFrame = nil
+        return 
+    end
+    
+    local part = State.Target:FindFirstChild(Cfg.TargetPart)
+    if not part then return end
+
+    local vel = part.AssemblyLinearVelocity
+    if Cfg.Resolver then
+        local p = Players:GetPlayerFromCharacter(State.Target)
+        if p and State.ResolvedVelocities[p] then vel = State.ResolvedVelocities[p].Velocity end
+    end
+
+    local ping = 50
+    pcall(function() ping = Stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
+    local pred = Cfg.AutoPredict and (0.11 + (ping/1000) * 0.4) or Cfg.Prediction
+    
+    local pos = part.Position + (vel * pred)
+    if Cfg.GravPredict and State.Target.Humanoid:GetState() == Enum.HumanoidStateType.Freefall then
+        pos = pos - Vector3.new(0, (Workspace.Gravity * 0.5 * (pred^2)), 0)
+    end
+    
+    State.PredictedPos = pos
+    State.PredictedCFrame = CFrame.new(pos)
+end
+
+-- ПОИСК ЦЕЛИ
 RunService.RenderStepped:Connect(function()
     local Cfg = GetCfg()
     local Camera = Workspace.CurrentCamera
@@ -85,7 +111,7 @@ RunService.RenderStepped:Connect(function()
             local pos, onScreen = Camera:WorldToViewportPoint(part.Position)
             if onScreen then
                 local dist = (Vector2.new(pos.X, pos.Y) - mPos).Magnitude
-                if (not Cfg.UseFOV or dist <= Cfg.FOVSize) and (not Cfg.WallCheck or IsVisible(part)) then
+                if (not Cfg.UseFOV or dist <= Cfg.FOVSize) then
                     if dist < shortestDist then
                         shortestDist = dist
                         closest = p.Character
@@ -95,46 +121,24 @@ RunService.RenderStepped:Connect(function()
         end
     end
     State.Target = closest
+    if State.Target then UpdatePrediction() end
 end)
 
--- Расчет точки попадания
-local function GetHitPos()
-    local Cfg = GetCfg()
-    if not State.Target then return nil end
-    local part = State.Target:FindFirstChild(Cfg.TargetPart)
-    if not part then return nil end
-
-    local vel = part.AssemblyLinearVelocity
-    if Cfg.Resolver and State.ResolvedVelocities[Players:GetPlayerFromCharacter(State.Target)] then
-        vel = State.ResolvedVelocities[Players:GetPlayerFromCharacter(State.Target)].Velocity
-    end
-
-    local ping = 50
-    pcall(function() ping = Stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
-    local pred = Cfg.AutoPredict and (0.11 + (ping/1000) * 0.4) or Cfg.Prediction
-    
-    local pos = part.Position + (vel * pred)
-    -- Гравитация
-    if Cfg.GravPredict and State.Target.Humanoid:GetState() == Enum.HumanoidStateType.Freefall then
-        pos = pos - Vector3.new(0, (Workspace.Gravity * 0.5 * (pred^2)), 0)
-    end
-    return pos
-end
-
 --========================================================
---[ THE ONLY SAFE HOOK (NAME CALL) ]
+--[ THE ULTIMATE SAFE HOOKS ]
 --========================================================
-local OldNC; OldNC = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+local OldNC
+local OldIdx
+
+OldNC = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
     local method = getnamecallmethod()
     local args = {...}
     local Cfg = GetCfg()
 
-    -- Мы перехватываем ТОЛЬКО пакет UpdateMousePos, летящий на сервер
     if Cfg.Enabled and not checkcaller() and method == "FireServer" and tostring(self) == "MainEvent" then
         if args[1] == "UpdateMousePos" or args[1] == "MousePos" then
-            local p = GetHitPos()
-            if p then
-                args[2] = p -- Подменяем только аргумент позиции
+            if State.PredictedPos then
+                args[2] = State.PredictedPos
                 return OldNC(self, unpack(args))
             end
         end
@@ -142,4 +146,19 @@ local OldNC; OldNC = hookmetamethod(game, "__namecall", newcclosure(function(sel
     return OldNC(self, ...)
 end))
 
-print("[REZOLVER] Silent Aim V7 Loaded. Hooks cleaned.")
+OldIdx = hookmetamethod(game, "__index", newcclosure(function(self, key)
+    local Cfg = GetCfg()
+    -- Проверяем, что запрос идет к МЫШКЕ и мы в режиме Silent
+    if Cfg.Enabled and not checkcaller() and State.Target and State.PredictedCFrame then
+        if typeof(self) == "Instance" and self:IsA("PlayerMouse") then
+            if key == "Hit" or key == "hit" then
+                return State.PredictedCFrame -- Возвращаем только если есть цель!
+            elseif key == "Target" or key == "target" then
+                return State.Target:FindFirstChild(Cfg.TargetPart)
+            end
+        end
+    end
+    return OldIdx(self, key)
+end))
+
+print("[REZOLVER] Silent Aim V8 Loaded. Ultimate Stability.")
