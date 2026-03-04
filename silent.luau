@@ -94,6 +94,18 @@ local function UpdatePrediction()
     
     State.PredictedPos = pos
     State.PredictedCFrame = CFrame.new(pos)
+
+    -- Экспортируем данные для HitChance
+    local p = Players:GetPlayerFromCharacter(State.Target)
+    if p then
+    local speed = vel.Magnitude
+    local dist = (State.Target:FindFirstChild("HumanoidRootPart") and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")) and (State.Target.HumanoidRootPart.Position - LocalPlayer.Character.HumanoidRootPart.Position).Magnitude or 0
+    
+    local chance = 100
+    chance = chance - math.clamp(dist * 0.15, 0, 40)
+    chance = chance - math.clamp(speed * 0.4, 0, 35)
+    chance = chance - math.clamp((ping/1000) * 30, 0, 20)
+    getgenv().RezolverSilent.LastHitChance = math.clamp(math.floor(chance), 5, 99)
 end
 
 -- Поиск цели
